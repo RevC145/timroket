@@ -5,5 +5,5 @@ import react from '@vitejs/plugin-react'
 // Jika repo ini adalah <username>.github.io, gunakan base: '/'
 export default defineConfig({
   plugins: [react()],
-  base: '/sansantcgdashboard/',
+  base: '/timroket/',
 })
