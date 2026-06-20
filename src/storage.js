@@ -10,14 +10,22 @@ const API_KEY = import.meta.env.VITE_JSONBIN_API_KEY || '';
 export const isRemoteEnabled = Boolean(BIN_ID && API_KEY);
 
 const URL_BASE = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
-let _cache = null; // in-memory cache per-session
+let _cache = null; // fallback jika fetch gagal (mis. offline sebentar)
 
-async function fetchRemote() {
-  if (_cache) return _cache;
+// forceFresh=true → selalu ambil data terbaru dari server (dipakai loadData,
+// termasuk saat auto-refresh/polling, supaya perubahan dari user lain kelihatan).
+// forceFresh=false → boleh pakai cache (dipakai internal saat saveData,
+// supaya tidak perlu fetch 2x untuk operasi read-modify-write yang sama).
+async function fetchRemote(forceFresh = true) {
+  if (!forceFresh && _cache) return _cache;
   const r = await fetch(`${URL_BASE}/latest`, {
     headers: { 'X-Master-Key': API_KEY },
+    cache: 'no-store',
   });
-  if (!r.ok) throw new Error('Fetch remote failed: ' + r.status);
+  if (!r.ok) {
+    if (_cache) return _cache; // fallback ke cache lama kalau request gagal
+    throw new Error('Fetch remote failed: ' + r.status);
+  }
   _cache = (await r.json()).record || {};
   return _cache;
 }
@@ -35,7 +43,7 @@ async function pushRemote(record) {
 export async function loadData(key, fallback = null) {
   if (isRemoteEnabled) {
     try {
-      const rec = await fetchRemote();
+      const rec = await fetchRemote(true); // selalu fresh agar auto-refresh bekerja
       return rec[key] !== undefined ? rec[key] : fallback;
     } catch (e) { console.warn('Remote load failed, fallback to local:', e); }
   }
@@ -49,7 +57,9 @@ export async function saveData(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   if (isRemoteEnabled) {
     try {
-      const rec = await fetchRemote().catch(() => ({}));
+      // Ambil data terbaru dulu (fresh) sebelum menimpa, supaya perubahan
+      // dari user lain di key yang berbeda tidak ketiban/hilang.
+      const rec = await fetchRemote(true).catch(() => ({}));
       rec[key] = value;
       await pushRemote(rec);
     } catch (e) { console.warn('Remote save failed:', e); throw e; }
