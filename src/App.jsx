@@ -3,7 +3,7 @@ import {
   Trophy, Users, Shield, BarChart3, Plus, Trash2, Search, Save, X,
   ChevronDown, ChevronUp, Loader2, Download, Upload, Cloud, HardDrive,
   Swords, ShieldCheck, Layers, LogOut, CheckCircle, XCircle, Clock,
-  UserPlus, LogIn, Eye, EyeOff, Crown, Menu, Settings,
+  UserPlus, LogIn, Eye, EyeOff, Crown, Menu, Settings, Lock,
 } from 'lucide-react';
 import { loadData, saveData, isRemoteEnabled, exportAllData, importAllData, hashPassword, ADMIN_USERNAME } from './storage';
 import { CARD_DB, CATEGORY_LABELS, CATEGORY_LABELS_SHORT, CATEGORY_COLORS } from './cardDatabase';
@@ -756,6 +756,7 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
   const [selected, setSelected] = useState(teamNames[0]||null);
   const [showNewForm, setShowNewForm] = useState(false);
   const [newName, setNewName] = useState('');
+  const isAdmin = currentUser.role === 'admin';
 
   useEffect(()=>{
     if (!selected && teamNames.length>0) setSelected(teamNames[0]);
@@ -771,6 +772,15 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
     showToast('✅ Tim ditambahkan!');
   };
 
+  // Pemilik tim = yang membuatnya (createdBy). Tim lama tanpa createdBy
+  // dianggap tidak bermilik — hanya admin yang boleh kelola, supaya aman
+  // (tidak ada member biasa yang bisa "mengklaim" tim orang lain).
+  const canManage = (teamInfo) => {
+    if (isAdmin) return true;
+    if (!teamInfo?.createdBy) return false;
+    return teamInfo.createdBy === currentUser.username;
+  };
+
   return (
     <div>
       <SectionTitle emoji="🃏">Tim & Deck Komunitas</SectionTitle>
@@ -778,7 +788,9 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
         {/* SIDEBAR */}
         <div>
           <div style={{display:'flex', flexDirection:'column', gap:6, marginBottom:10}}>
-            {teamNames.map(name=>(
+            {teamNames.map(name=>{
+              const mine = canManage(teams[name]);
+              return (
               <div key={name} onClick={()=>{ setSelected(name); setShowNewForm(false); }} style={{
                 display:'flex', alignItems:'center', justifyContent:'space-between', gap:6,
                 ...card(), padding:'10px 12px', cursor:'pointer',
@@ -787,14 +799,15 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
               }}>
                 <div style={{minWidth:0}}>
                   <div style={{fontWeight:700, fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
-                    color:selected===name?C.accent2:C.text}}>
+                    color:selected===name?C.accent2:C.text, display:'flex', alignItems:'center', gap:5}}>
                     🛡️ {name}
+                    {!mine && <Lock size={10} style={{color:C.dim, flexShrink:0}} title="Hanya pemilik/admin yang bisa edit"/>}
                   </div>
                   <div style={{fontSize:10, color:C.dim}}>
                     Div {teams[name].group||'A'} · {(teams[name].deck||[]).reduce((s,c)=>s+(c.qty||0),0)} kartu
                   </div>
                 </div>
-                {currentUser.role==='admin' && (
+                {mine && (
                   <button onClick={e=>{e.stopPropagation(); if(confirm(`Hapus tim "${name}"?`)){
                     const n={...teams}; delete n[name]; saveTeams(n); showToast('Tim dihapus');
                   }}} style={{background:'none',border:'none',color:C.dim,cursor:'pointer',flexShrink:0}}>
@@ -802,7 +815,8 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
           {!showNewForm ? (
             <button onClick={()=>setShowNewForm(true)} style={{
@@ -832,7 +846,13 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
         {/* DETAIL */}
         <div>
           {selected && teams[selected]
-            ? <TeamDetail name={selected} info={teams[selected]} onUpdate={info=>saveTeams({...teams,[selected]:info})} showToast={showToast} />
+            ? <TeamDetail
+                name={selected}
+                info={teams[selected]}
+                onUpdate={info=>saveTeams({...teams,[selected]:info})}
+                showToast={showToast}
+                readOnly={!canManage(teams[selected])}
+              />
             : <EmptyState text="Pilih atau buat tim baru 👈" />
           }
         </div>
@@ -841,12 +861,17 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
   );
 }
 
-function TeamDetail({ name, info, onUpdate, showToast }) {
+function TeamDetail({ name, info, onUpdate, showToast, readOnly }) {
   const [player, setPlayer] = useState(info.player||'');
   const [group, setGroup] = useState(info.group||'A');
   useEffect(()=>{ setPlayer(info.player||''); setGroup(info.group||'A'); },[name]);
 
-  const save = () => { onUpdate({...info,player,group}); showToast('✅ Info tim disimpan!'); };
+  const guard = () => {
+    if (readOnly) { showToast('🔒 Hanya pemilik tim atau admin yang bisa mengedit ini','error'); return true; }
+    return false;
+  };
+
+  const save = () => { if (guard()) return; onUpdate({...info,player,group}); showToast('✅ Info tim disimpan!'); };
 
   const deck = info.deck||[];
   const total = deck.reduce((s,c)=>s+(c.qty||0),0);
@@ -856,6 +881,7 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
   const maxQtyFor = (category) => category === 'energy' ? 99 : 4;
 
   const addCard = (cardName, category) => {
+    if (guard()) return;
     const idx = deck.findIndex(c=>c.name===cardName&&c.category===category);
     const max = maxQtyFor(category);
     const newDeck = idx>=0
@@ -865,6 +891,7 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
   };
 
   const setQty = (idx, rawValue) => {
+    if (readOnly) return; // diam saja (bukan via klik tombol, jadi tidak perlu toast tiap ketik)
     const card = deck[idx];
     if (!card) return;
     const max = maxQtyFor(card.category);
@@ -881,29 +908,46 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
 
   // Saat input kehilangan fokus, qty kosong dianggap dihapus dari deck
   const finalizeQty = (idx) => {
+    if (readOnly) return;
     const c = deck[idx];
     if (c && (c.qty === '' || c.qty === 0 || Number.isNaN(c.qty))) {
       onUpdate({...info, deck: deck.filter((_,i)=>i!==idx)});
     }
   };
 
+  const removeCard = (idx) => { if (guard()) return; onUpdate({...info,deck:deck.filter((_,i)=>i!==idx)}); };
+
   return (
     <div style={{display:'flex',flexDirection:'column',gap:14}}>
+      {readOnly && (
+        <div style={{
+          ...card(), padding:'10px 14px', border:`1px solid ${C.orange}66`,
+          background:`${C.orange}11`, display:'flex', alignItems:'center', gap:8,
+          fontSize:12, color:C.orange, fontWeight:700,
+        }}>
+          <Lock size={14}/> Mode lihat saja — ini bukan tim kamu, jadi tidak bisa diedit/dihapus.
+        </div>
+      )}
+
       <div style={{...card(),padding:16}}>
         <div className="bebas" style={{fontSize:22,color:C.accent,marginBottom:12}}>🛡️ {name}</div>
         <div style={{display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:10, alignItems:'end'}}>
           <Field label="Nama Pemain / Trainer">
-            <input value={player} onChange={e=>setPlayer(e.target.value)} placeholder="Nama pemain..." style={inputBase} />
+            <input value={player} onChange={e=>!readOnly && setPlayer(e.target.value)} placeholder="Nama pemain..."
+              style={inputBase} disabled={readOnly} />
           </Field>
           <Field label="Divisi">
-            <select value={group} onChange={e=>setGroup(e.target.value)} style={inputBase}>
+            <select value={group} onChange={e=>!readOnly && setGroup(e.target.value)} style={inputBase} disabled={readOnly}>
               {['A','B','C','D','E','F','G','H','I','J','K','L'].map(g=>(
                 <option key={g} value={g}>Divisi {g}</option>
               ))}
             </select>
           </Field>
-          <button onClick={save} style={{...btnSuccess, height:40, padding:'0 16px'}}>
-            <Save size={14}/> Simpan
+          <button onClick={save} style={{
+            ...btnSuccess, height:40, padding:'0 16px',
+            ...(readOnly ? { background:C.surface, color:C.dim, cursor:'not-allowed' } : {}),
+          }}>
+            {readOnly ? <Lock size={14}/> : <Save size={14}/>} {readOnly ? 'Terkunci' : 'Simpan'}
           </button>
         </div>
       </div>
@@ -921,7 +965,7 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
 
         {deck.length===0 ? (
           <div style={{color:C.dim,fontSize:12,padding:'16px 0',textAlign:'center'}}>
-            🃏 Belum ada kartu. Tambahkan dari database di bawah!
+            🃏 Belum ada kartu. {readOnly ? 'Tim ini belum mengisi deck.' : 'Tambahkan dari database di bawah!'}
           </div>
         ) : (
           <div style={{marginBottom:14}}>
@@ -948,12 +992,14 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
                       }}>
                         <span style={{flex:1,fontSize:12}}>{c.name}</span>
                         <input type="number" min="0" value={c.qty} onChange={e=>setQty(idx,e.target.value)}
-                          onBlur={()=>finalizeQty(idx)}
-                          style={{...inputScore,fontSize:14,width:44,padding:2}} />
-                        <button onClick={()=>onUpdate({...info,deck:deck.filter((_,i)=>i!==idx)})}
-                          style={{background:'none',border:'none',color:C.dim,cursor:'pointer'}}>
-                          <Trash2 size={13}/>
-                        </button>
+                          onBlur={()=>finalizeQty(idx)} disabled={readOnly}
+                          style={{...inputScore,fontSize:14,width:44,padding:2, ...(readOnly?{opacity:.6,cursor:'not-allowed'}:{})}} />
+                        {!readOnly && (
+                          <button onClick={()=>removeCard(idx)}
+                            style={{background:'none',border:'none',color:C.dim,cursor:'pointer'}}>
+                            <Trash2 size={13}/>
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -962,7 +1008,7 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
             })}
           </div>
         )}
-        <CardPicker onAdd={addCard} />
+        {!readOnly && <CardPicker onAdd={addCard} />}
       </div>
     </div>
   );
