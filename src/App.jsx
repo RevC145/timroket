@@ -82,6 +82,56 @@ export default function App() {
     })();
   }, []);
 
+  // ── AUTO-REFRESH ──────────────────────────────────────────────
+  // Polling berkala agar perubahan dari pengguna lain (tim baru, hasil
+  // match baru, user baru signup) muncul otomatis tanpa perlu refresh
+  // manual. Hanya aktif jika Mode Cloud menyala (data benar2 dibagi
+  // ke banyak orang) — di Mode Lokal tidak relevan karena data hanya
+  // ada di browser sendiri.
+  useEffect(() => {
+    if (!isRemoteEnabled) return;
+    const interval = setInterval(async () => {
+      // Jangan ganggu kalau ada input sedang fokus (user lagi mengetik)
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+
+      try {
+        const [u, t, r] = await Promise.all([
+          loadData('sansan_users', {}),
+          loadData('sansan_teams', {}),
+          loadData('sansan_group_results', {}),
+        ]);
+        setUsers(prev => JSON.stringify(prev) !== JSON.stringify(u) ? (u || {}) : prev);
+        setTeams(prev => JSON.stringify(prev) !== JSON.stringify(t) ? (t || {}) : prev);
+        setGroupResults(prev => JSON.stringify(prev) !== JSON.stringify(r) ? (r || {}) : prev);
+      } catch (e) {
+        // diam saja, coba lagi di interval berikutnya
+      }
+    }, 8000); // setiap 8 detik
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Refresh otomatis juga saat tab kembali aktif (misal user pindah tab lalu balik lagi)
+  useEffect(() => {
+    if (!isRemoteEnabled) return;
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const [u, t, r] = await Promise.all([
+          loadData('sansan_users', {}),
+          loadData('sansan_teams', {}),
+          loadData('sansan_group_results', {}),
+        ]);
+        setUsers(u || {});
+        setTeams(t || {});
+        setGroupResults(r || {});
+      } catch {}
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   const showToast = (msg, type='success') => {
     setToast({ msg, type });
     setTimeout(()=>setToast(''), 2500);
@@ -399,7 +449,7 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
           {/* Right side: badge + user + logout */}
           <div style={{display:'flex', alignItems:'center', gap:8, flexShrink:0}}>
             {isRemoteEnabled
-              ? <span style={{...pill(C.green), fontSize:10}}><Cloud size={10}/>Cloud</span>
+              ? <span style={{...pill(C.green), fontSize:10}} title="Data otomatis sinkron setiap ~8 detik"><Cloud size={10}/>Cloud · Live</span>
               : <span style={{...pill(C.dim), fontSize:10}}><HardDrive size={10}/>Lokal</span>
             }
             <div style={{display:'flex', alignItems:'center', gap:6}}>
@@ -801,17 +851,40 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
   const deck = info.deck||[];
   const total = deck.reduce((s,c)=>s+(c.qty||0),0);
 
+  // Energy (basic & special) tidak dibatasi 4 kopi seperti kartu lain di Pokemon TCG.
+  // Kategori lain (Pokemon, Supporter, Item, Stadium, Tool) tetap maksimal 4 kopi (aturan resmi).
+  const maxQtyFor = (category) => category === 'energy' ? 99 : 4;
+
   const addCard = (cardName, category) => {
     const idx = deck.findIndex(c=>c.name===cardName&&c.category===category);
+    const max = maxQtyFor(category);
     const newDeck = idx>=0
-      ? deck.map((c,i)=>i===idx?{...c,qty:Math.min((c.qty||0)+1,4)}:c)
+      ? deck.map((c,i)=>i===idx?{...c,qty:Math.min((c.qty||0)+1,max)}:c)
       : [...deck,{name:cardName,category,qty:1}];
     onUpdate({...info,deck:newDeck});
   };
 
-  const setQty = (idx, qty) => {
-    const q = Math.max(0,Math.min(4,+qty));
+  const setQty = (idx, rawValue) => {
+    const card = deck[idx];
+    if (!card) return;
+    const max = maxQtyFor(card.category);
+    // Biarkan kosong sementara saat user menghapus angka (tidak langsung dipaksa ke 0/1)
+    if (rawValue === '') {
+      onUpdate({...info, deck: deck.map((c,i)=>i===idx?{...c,qty:''}:c)});
+      return;
+    }
+    const parsed = parseInt(rawValue, 10);
+    if (Number.isNaN(parsed)) return;
+    const q = Math.max(0, Math.min(max, parsed));
     onUpdate({...info, deck: q===0 ? deck.filter((_,i)=>i!==idx) : deck.map((c,i)=>i===idx?{...c,qty:q}:c)});
+  };
+
+  // Saat input kehilangan fokus, qty kosong dianggap dihapus dari deck
+  const finalizeQty = (idx) => {
+    const c = deck[idx];
+    if (c && (c.qty === '' || c.qty === 0 || Number.isNaN(c.qty))) {
+      onUpdate({...info, deck: deck.filter((_,i)=>i!==idx)});
+    }
   };
 
   return (
@@ -862,7 +935,8 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
                     color:CATEGORY_COLORS[cat], margin:'8px 0 6px',
                     display:'flex', alignItems:'center', gap:6,
                   }}>
-                    {CATEGORY_LABELS[cat]} — {cardsInCat.reduce((s,c)=>s+c.qty,0)} kartu
+                    {CATEGORY_LABELS[cat]} — {cardsInCat.reduce((s,c)=>s+(c.qty||0),0)} kartu
+                    {cat==='energy' && <span style={{color:C.dim, fontWeight:400, textTransform:'none', letterSpacing:0}}> (tanpa batas 4)</span>}
                   </div>
                   {cardsInCat.map(c=>{
                     const idx=deck.indexOf(c);
@@ -873,8 +947,9 @@ function TeamDetail({ name, info, onUpdate, showToast }) {
                         border:`1px solid ${C.border}`, borderRadius:6, marginBottom:4,
                       }}>
                         <span style={{flex:1,fontSize:12}}>{c.name}</span>
-                        <input type="number" min="0" max="4" value={c.qty} onChange={e=>setQty(idx,e.target.value)}
-                          style={{...inputScore,fontSize:14,width:36,padding:2}} />
+                        <input type="number" min="0" value={c.qty} onChange={e=>setQty(idx,e.target.value)}
+                          onBlur={()=>finalizeQty(idx)}
+                          style={{...inputScore,fontSize:14,width:44,padding:2}} />
                         <button onClick={()=>onUpdate({...info,deck:deck.filter((_,i)=>i!==idx)})}
                           style={{background:'none',border:'none',color:C.dim,cursor:'pointer'}}>
                           <Trash2 size={13}/>
@@ -1147,7 +1222,7 @@ function TeamStatsDetail({ summary }) {
             return (
               <div key={cat} style={{marginBottom:8}}>
                 <div style={{fontSize:10, color:CATEGORY_COLORS[cat], textTransform:'uppercase', letterSpacing:1, fontWeight:700, marginBottom:4}}>
-                  {CATEGORY_LABELS[cat]} ({cards.reduce((s,c)=>s+c.qty,0)})
+                  {CATEGORY_LABELS[cat]} ({cards.reduce((s,c)=>s+(c.qty||0),0)})
                 </div>
                 <div style={{display:'flex', flexWrap:'wrap', gap:4}}>
                   {cards.map(c=>(
