@@ -4,8 +4,13 @@ import {
   ChevronDown, ChevronUp, Loader2, Download, Upload, Cloud, HardDrive,
   Swords, ShieldCheck, Layers, LogOut, CheckCircle, XCircle, Clock,
   UserPlus, LogIn, Eye, EyeOff, Crown, Menu, Settings, Lock,
+  Bell, KeyRound, UserCog, History, ArrowLeft, AlertTriangle,
 } from 'lucide-react';
-import { loadData, saveData, isRemoteEnabled, exportAllData, importAllData, hashPassword, ADMIN_USERNAME } from './storage';
+import {
+  loadData, loadDataSafe, saveData, mutateData, isRemoteEnabled,
+  exportAllData, importAllData, hashPassword, ADMIN_USERNAME,
+  isValidUsername, logActivity,
+} from './storage';
 import { CARD_DB, CATEGORY_LABELS, CATEGORY_LABELS_SHORT, CATEGORY_COLORS } from './cardDatabase';
 import { computeAllStandings, computeTeamSummary, computeCommunityStats } from './standings';
 import { LOGO_FULL } from './assets/logoData';
@@ -54,60 +59,80 @@ export default function App() {
   const [teams, setTeams] = useState({});
   const [groupResults, setGroupResults] = useState({});
   const [toast, setToast] = useState('');
+  const [connError, setConnError] = useState(null); // pesan error kalau gagal konek ke cloud
+  const [loadAttempt, setLoadAttempt] = useState(0); // dipakai untuk tombol "coba lagi"
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const u = await loadData('sansan_users', {});
-      const t = await loadData('sansan_teams', {});
-      const r = await loadData('sansan_group_results', {});
-      setUsers(u || {});
-      setTeams(t || {});
-      setGroupResults(r || {});
-
-      // cek session lokal
+      setConnError(null);
       try {
-        const sess = sessionStorage.getItem('sansan_session');
-        if (sess) {
-          const parsed = JSON.parse(sess);
-          const userObj = (u || {})[parsed.username];
-          if (userObj && userObj.status === 'approved') {
-            setAuthState(userObj);
+        const u = await loadData('sansan_users', {});
+        const t = await loadData('sansan_teams', {});
+        const r = await loadData('sansan_group_results', {});
+        if (cancelled) return;
+        setUsers(u || {});
+        setTeams(t || {});
+        setGroupResults(r || {});
+
+        // cek session lokal — hanya dipakai untuk auto-login di TAB/sesi
+        // browser yang sama. Login ulang di device/browser lain memang
+        // wajar (session browser memang tidak nyambung antar device),
+        // TAPI akun & datanya sendiri TIDAK hilang selama Mode Cloud aktif
+        // dan fetch di atas berhasil (lihat percabangan catch di bawah).
+        try {
+          const sess = sessionStorage.getItem('sansan_session');
+          if (sess) {
+            const parsed = JSON.parse(sess);
+            const userObj = (u || {})[parsed.username];
+            if (userObj && userObj.status === 'approved') {
+              setAuthState(userObj);
+            } else {
+              setAuthState(false);
+            }
           } else {
             setAuthState(false);
           }
-        } else {
-          setAuthState(false);
-        }
-      } catch { setAuthState(false); }
+        } catch { setAuthState(false); }
+      } catch (e) {
+        if (cancelled) return;
+        // PENTING: gagal fetch dari cloud BUKAN berarti data/akun kosong.
+        // Jangan set authState(false) di sini — itu akan membuat user
+        // terlempar ke halaman signup seolah akunnya tidak pernah ada.
+        // Tampilkan layar error + tombol coba lagi sebagai gantinya.
+        console.error('Gagal memuat data dari server:', e);
+        setConnError(
+          isRemoteEnabled
+            ? 'Gagal terhubung ke server data (JSONBin). Akun dan datamu aman, ini cuma masalah koneksi sementara.'
+            : 'Gagal memuat data lokal.'
+        );
+      }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   // ── AUTO-REFRESH ──────────────────────────────────────────────
   // Polling berkala agar perubahan dari pengguna lain (tim baru, hasil
   // match baru, user baru signup) muncul otomatis tanpa perlu refresh
-  // manual. Hanya aktif jika Mode Cloud menyala (data benar2 dibagi
-  // ke banyak orang) — di Mode Lokal tidak relevan karena data hanya
-  // ada di browser sendiri.
+  // manual. Hanya aktif jika Mode Cloud menyala. Pakai loadDataSafe
+  // supaya kalau satu kali polling gagal (network blip), state TIDAK
+  // ditimpa dengan kosong — cukup dilewati, dicoba lagi di interval berikutnya.
   useEffect(() => {
     if (!isRemoteEnabled) return;
     const interval = setInterval(async () => {
-      // Jangan ganggu kalau ada input sedang fokus (user lagi mengetik)
       const activeTag = document.activeElement?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
 
-      try {
-        const [u, t, r] = await Promise.all([
-          loadData('sansan_users', {}),
-          loadData('sansan_teams', {}),
-          loadData('sansan_group_results', {}),
-        ]);
-        setUsers(prev => JSON.stringify(prev) !== JSON.stringify(u) ? (u || {}) : prev);
-        setTeams(prev => JSON.stringify(prev) !== JSON.stringify(t) ? (t || {}) : prev);
-        setGroupResults(prev => JSON.stringify(prev) !== JSON.stringify(r) ? (r || {}) : prev);
-      } catch (e) {
-        // diam saja, coba lagi di interval berikutnya
-      }
-    }, 8000); // setiap 8 detik
+      const [u, t, r] = await Promise.all([
+        loadDataSafe('sansan_users', {}),
+        loadDataSafe('sansan_teams', {}),
+        loadDataSafe('sansan_group_results', {}),
+      ]);
+      // loadDataSafe mengembalikan undefined kalau gagal — jangan timpa state kalau begitu
+      if (u !== undefined) setUsers(prev => JSON.stringify(prev) !== JSON.stringify(u) ? (u || {}) : prev);
+      if (t !== undefined) setTeams(prev => JSON.stringify(prev) !== JSON.stringify(t) ? (t || {}) : prev);
+      if (r !== undefined) setGroupResults(prev => JSON.stringify(prev) !== JSON.stringify(r) ? (r || {}) : prev);
+    }, 20000); // setiap 20 detik (dijaga tidak terlalu sering agar hemat kuota JSONBin free tier)
 
     return () => clearInterval(interval);
   }, []);
@@ -117,16 +142,14 @@ export default function App() {
     if (!isRemoteEnabled) return;
     const onVisible = async () => {
       if (document.visibilityState !== 'visible') return;
-      try {
-        const [u, t, r] = await Promise.all([
-          loadData('sansan_users', {}),
-          loadData('sansan_teams', {}),
-          loadData('sansan_group_results', {}),
-        ]);
-        setUsers(u || {});
-        setTeams(t || {});
-        setGroupResults(r || {});
-      } catch {}
+      const [u, t, r] = await Promise.all([
+        loadDataSafe('sansan_users', {}),
+        loadDataSafe('sansan_teams', {}),
+        loadDataSafe('sansan_group_results', {}),
+      ]);
+      if (u !== undefined) setUsers(u || {});
+      if (t !== undefined) setTeams(t || {});
+      if (r !== undefined) setGroupResults(r || {});
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
@@ -137,17 +160,60 @@ export default function App() {
     setTimeout(()=>setToast(''), 2500);
   };
 
-  const saveUsers = async (newUsers) => {
-    setUsers(newUsers);
-    try { await saveData('sansan_users', newUsers); } catch { showToast('Gagal simpan user','error'); }
+  // PENTING: simpan ke server DULU, baru update state lokal setelah berhasil.
+  // Kalau urutan dibalik (state diubah duluan), dan saveData gagal/lambat,
+  // auto-refresh berikutnya bisa "menimpa balik" dengan data lama dari
+  // server — terlihat seperti perubahan barusan hilang padahal cuma race
+  // condition, bukan benar-benar hilang.
+  //
+  // Dua mode pemanggilan:
+  //   saveUsers(objekBaru)                 → pola lama, replace langsung
+  //   saveUsers(null, current => baru)     → pola atomic, fetch-fresh dulu
+  //                                           baru terapkan updaterFn, jauh
+  //                                           lebih aman dari race condition
+  //                                           saat banyak orang akses bersamaan
+  const saveUsers = async (newUsersOrNull, updaterFn) => {
+    try {
+      if (updaterFn) {
+        const result = await mutateData('sansan_users', updaterFn);
+        setUsers(result);
+        return result;
+      }
+      await saveData('sansan_users', newUsersOrNull);
+      setUsers(newUsersOrNull);
+      return newUsersOrNull;
+    } catch (e) {
+      if (e?.message === 'USERNAME_TAKEN') return 'USERNAME_TAKEN'; // dilempar balik, bukan error koneksi
+      console.error('Gagal simpan user:', e);
+      showToast('⚠️ Gagal simpan ke server (cek koneksi). Perubahan belum tersimpan, coba lagi.','error');
+      throw e; // biar pemanggil (mis. handleSignup) tahu ini gagal dan tidak lanjut seolah sukses
+    }
   };
-  const saveTeams = async (newTeams) => {
-    setTeams(newTeams);
-    try { await saveData('sansan_teams', newTeams); } catch { showToast('Gagal simpan tim','error'); }
+  const saveTeams = async (newTeamsOrNull, updaterFn) => {
+    try {
+      if (updaterFn) {
+        const result = await mutateData('sansan_teams', updaterFn);
+        setTeams(result);
+        return result;
+      }
+      await saveData('sansan_teams', newTeamsOrNull);
+      setTeams(newTeamsOrNull);
+      return newTeamsOrNull;
+    } catch (e) {
+      console.error('Gagal simpan tim:', e);
+      showToast('⚠️ Gagal simpan ke server (cek koneksi). Perubahan belum tersimpan, coba lagi.','error');
+      throw e;
+    }
   };
   const saveGroupResults = async (gr) => {
-    setGroupResults(gr);
-    try { await saveData('sansan_group_results', gr); } catch { showToast('Gagal simpan hasil','error'); }
+    try {
+      await saveData('sansan_group_results', gr);
+      setGroupResults(gr);
+    } catch (e) {
+      console.error('Gagal simpan hasil:', e);
+      showToast('⚠️ Gagal simpan ke server (cek koneksi). Perubahan belum tersimpan, coba lagi.','error');
+      throw e;
+    }
   };
 
   const login = (userObj) => {
@@ -160,6 +226,35 @@ export default function App() {
     setAuthState(false);
     sessionStorage.removeItem('sansan_session');
   };
+
+  // Dipanggil setelah user edit profil sendiri (ganti nama/password), supaya
+  // tampilan (nama di header, dsb) langsung update tanpa perlu logout-login lagi.
+  const updateCurrentUser = (updatedUserObj) => {
+    setAuthState(updatedUserObj);
+  };
+
+  const { confirm, modal: confirmModal } = useConfirm();
+
+  // Gagal konek ke server data → JANGAN lanjut ke layar login/signup
+  // (itu bisa terlihat seolah akun hilang). Tampilkan layar retry yang jelas.
+  if (connError) {
+    return (
+      <div style={{
+        display:'flex', alignItems:'center', justifyContent:'center', minHeight:'100vh',
+        flexDirection:'column', gap:16, padding:24, textAlign:'center',
+      }}>
+        <img src={LOGO_FULL} alt="SANSAN TCG" style={{width:90, borderRadius:'50%', opacity:.7}} />
+        <div style={{fontSize:40}}>📡</div>
+        <div style={{fontWeight:800, fontSize:16, color:C.text}}>Gagal Terhubung ke Server</div>
+        <div style={{color:C.dim, fontSize:13, maxWidth:380, lineHeight:1.6}}>
+          {connError}
+        </div>
+        <button onClick={()=>setLoadAttempt(n=>n+1)} style={{...btnPrimary}}>
+          🔄 Coba Lagi
+        </button>
+      </div>
+    );
+  }
 
   if (authState === null) {
     return (
@@ -184,12 +279,15 @@ export default function App() {
     <>
       <Dashboard
         currentUser={authState}
+        updateCurrentUser={updateCurrentUser}
         users={users} saveUsers={saveUsers}
         teams={teams} saveTeams={saveTeams}
         groupResults={groupResults} saveGroupResults={saveGroupResults}
         showToast={showToast} logout={logout}
+        confirm={confirm}
       />
       <ToastBar toast={toast} />
+      {confirmModal}
     </>
   );
 }
@@ -207,6 +305,57 @@ function ToastBar({ toast }) {
       {toast.msg}
     </div>
   );
+}
+
+// ══════════════════════ CONFIRM MODAL (pengganti window.confirm) ══════════════════════
+// Dipakai via hook useConfirm() di bawah — lebih konsisten dengan desain
+// dashboard dan jauh lebih ramah di mobile dibanding window.confirm() bawaan browser.
+function ConfirmModal({ state, onConfirm, onCancel }) {
+  if (!state) return null;
+  const danger = state.danger !== false;
+  return (
+    <div style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,.6)', zIndex:10000,
+      display:'flex', alignItems:'center', justifyContent:'center', padding:20,
+    }} onClick={onCancel}>
+      <div style={{...card(), padding:24, maxWidth:380, width:'100%', boxShadow:'0 10px 40px rgba(0,0,0,.5)'}}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{display:'flex', alignItems:'center', gap:10, marginBottom:12}}>
+          <div style={{
+            width:36, height:36, borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center',
+            background: danger ? C.red+'22' : C.accent2+'22', flexShrink:0,
+          }}>
+            <AlertTriangle size={18} style={{color: danger ? C.red : C.accent2}}/>
+          </div>
+          <div style={{fontWeight:800, fontSize:15}}>{state.title || 'Konfirmasi'}</div>
+        </div>
+        <div style={{color:C.dim, fontSize:13, lineHeight:1.6, marginBottom:20}}>{state.message}</div>
+        <div style={{display:'flex', gap:8, justifyContent:'flex-end'}}>
+          <button onClick={onCancel} style={btnGhost}>Batal</button>
+          <button onClick={onConfirm} style={danger ? btnDanger : btnPrimary}>
+            {state.confirmLabel || 'Ya, Lanjutkan'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Hook sederhana untuk memunculkan ConfirmModal secara imperative,
+// mirip window.confirm() tapi async dan custom-styled.
+function useConfirm() {
+  const [state, setState] = useState(null);
+  const resolverRef = useRef(null);
+
+  const confirm = (opts) => {
+    setState(typeof opts === 'string' ? { message: opts } : opts);
+    return new Promise((resolve) => { resolverRef.current = resolve; });
+  };
+  const handleConfirm = () => { setState(null); resolverRef.current?.(true); };
+  const handleCancel  = () => { setState(null); resolverRef.current?.(false); };
+
+  const modal = <ConfirmModal state={state} onConfirm={handleConfirm} onCancel={handleCancel} />;
+  return { confirm, modal };
 }
 
 // ══════════════════════ AUTH PAGE ══════════════════════
@@ -237,9 +386,13 @@ function AuthPage({ users, saveUsers, onLogin, showToast }) {
     if (!form.username.trim() || !form.displayName.trim() || !form.password) {
       showToast('Semua kolom wajib diisi','error'); return;
     }
+    const username = form.username.toLowerCase().trim();
+    if (!isValidUsername(username)) {
+      showToast('Username 3-24 karakter, hanya huruf/angka/underscore/titik/strip (tanpa spasi)','error');
+      return;
+    }
     if (form.password !== form.confirm) { showToast('Password tidak cocok','error'); return; }
     if (form.password.length < 6) { showToast('Password minimal 6 karakter','error'); return; }
-    const username = form.username.toLowerCase().trim();
     if (users[username]) { showToast('Username sudah dipakai','error'); return; }
 
     setLoading(true);
@@ -252,14 +405,28 @@ function AuthPage({ users, saveUsers, onLogin, showToast }) {
         status: isFirstAdmin ? 'approved' : 'pending',
         createdAt: new Date().toISOString(),
       };
-      const newUsers = { ...users, [username]: newUser };
-      await saveUsers(newUsers);
+      // Pakai saveUsersAtomic (mutateData di balik layar) supaya kalau ada
+      // 2 orang signup nyaris bersamaan, keduanya tetap tersimpan —
+      // tidak saling menimpa seperti pola lama (snapshot state basi).
+      const result = await saveUsers(null, (current) => {
+        if (current[username]) throw new Error('USERNAME_TAKEN');
+        return { ...current, [username]: newUser };
+      });
+      if (result === 'USERNAME_TAKEN') {
+        showToast('Username baru saja dipakai orang lain, coba username lain','error');
+        return;
+      }
+      await logActivity(username, isFirstAdmin ? 'admin_signup' : 'signup', `Mendaftar sebagai ${newUser.displayName}`);
       if (isFirstAdmin) {
         onLogin(newUser);
       } else {
         setMode('pending');
         showToast('✅ Akun dibuat! Tunggu persetujuan admin.','success');
       }
+    } catch (e) {
+      // saveUsers sudah menampilkan toast errornya sendiri; di sini cukup
+      // pastikan kita TIDAK pindah ke mode 'pending' atau login seolah berhasil.
+      console.error('Signup gagal:', e);
     } finally { setLoading(false); }
   };
 
@@ -385,17 +552,18 @@ function AuthPage({ users, saveUsers, onLogin, showToast }) {
 }
 
 // ══════════════════════ DASHBOARD (setelah login) ══════════════════════
-function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResults, saveGroupResults, showToast, logout }) {
+function Dashboard({ currentUser, updateCurrentUser, users, saveUsers, teams, saveTeams, groupResults, saveGroupResults, showToast, logout, confirm }) {
   const [tab, setTab] = useState('overview');
-  const [menuOpen, setMenuOpen] = useState(false);
   const isAdmin = currentUser.role === 'admin';
+  const pendingCount = isAdmin ? Object.values(users).filter(u=>u.status==='pending').length : 0;
 
   const TABS = [
     {id:'overview', label:'Overview', icon:'🏠'},
     {id:'groups',   label:'Divisi',   icon:'🛡️'},
     {id:'teams',    label:'Tim & Deck',icon:'🃏'},
     {id:'stats',    label:'Stats',     icon:'📊'},
-    ...(isAdmin ? [{id:'admin', label:'Admin', icon:'👑'}] : []),
+    {id:'profile',  label:'Profil',    icon:'👤'},
+    ...(isAdmin ? [{id:'admin', label:'Admin', icon:'👑', badge: pendingCount}] : []),
   ];
 
   return (
@@ -417,6 +585,7 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
           <nav style={{display:'flex', gap:2, flex:1, overflowX:'auto'}} className="hide-mobile">
             {TABS.map(t => (
               <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                position:'relative',
                 background: tab===t.id ? 'rgba(224,64,251,.15)' : 'none',
                 border:'none', color: tab===t.id ? C.accent2 : C.dim,
                 fontSize:12, fontWeight:700, padding:'6px 12px', borderRadius:8,
@@ -424,6 +593,13 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
                 borderBottom: tab===t.id ? `2px solid ${C.accent2}` : '2px solid transparent',
               }}>
                 <span>{t.icon}</span> {t.label}
+                {!!t.badge && (
+                  <span style={{
+                    position:'absolute', top:2, right:2, background:C.red, color:'#fff',
+                    fontSize:9, fontWeight:800, borderRadius:99, minWidth:15, height:15,
+                    display:'flex', alignItems:'center', justifyContent:'center', padding:'0 3px',
+                  }}>{t.badge}</span>
+                )}
               </button>
             ))}
           </nav>
@@ -433,6 +609,7 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
             <div style={{display:'flex', gap:2, overflowX:'auto', flex:1}}>
               {TABS.map(t => (
                 <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                  position:'relative',
                   background: tab===t.id ? 'rgba(224,64,251,.15)' : 'none',
                   border:'none', color: tab===t.id ? C.accent2 : C.dim,
                   fontSize:11, fontWeight:700, padding:'5px 8px', borderRadius:8,
@@ -441,6 +618,13 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
                 }}>
                   <span style={{fontSize:16}}>{t.icon}</span>
                   <span style={{fontSize:9}}>{t.label}</span>
+                  {!!t.badge && (
+                    <span style={{
+                      position:'absolute', top:0, right:2, background:C.red, color:'#fff',
+                      fontSize:8, fontWeight:800, borderRadius:99, minWidth:13, height:13,
+                      display:'flex', alignItems:'center', justifyContent:'center', padding:'0 3px',
+                    }}>{t.badge}</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -449,10 +633,10 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
           {/* Right side: badge + user + logout */}
           <div style={{display:'flex', alignItems:'center', gap:8, flexShrink:0}}>
             {isRemoteEnabled
-              ? <span style={{...pill(C.green), fontSize:10}} title="Data otomatis sinkron setiap ~8 detik"><Cloud size={10}/>Cloud · Live</span>
+              ? <span style={{...pill(C.green), fontSize:10}} title="Data otomatis sinkron setiap ~20 detik"><Cloud size={10}/>Cloud · Live</span>
               : <span style={{...pill(C.dim), fontSize:10}}><HardDrive size={10}/>Lokal</span>
             }
-            <div style={{display:'flex', alignItems:'center', gap:6}}>
+            <div style={{display:'flex', alignItems:'center', gap:6, cursor:'pointer'}} onClick={()=>setTab('profile')}>
               {isAdmin && <Crown size={14} style={{color:C.accent}}/>}
               <span style={{fontSize:12, fontWeight:700, color:C.text}} className="hide-mobile">
                 {currentUser.displayName}
@@ -478,10 +662,16 @@ function Dashboard({ currentUser, users, saveUsers, teams, saveTeams, groupResul
       <main style={{maxWidth:1400, margin:'0 auto', padding:'16px 12px'}}>
         <div className="fade-in">
           {tab === 'overview' && <OverviewTab teams={teams} groupResults={groupResults} currentUser={currentUser} />}
-          {tab === 'groups'   && <GroupsTab teams={teams} groupResults={groupResults} setGroupResults={saveGroupResults} showToast={showToast} />}
-          {tab === 'teams'    && <TeamsTab teams={teams} saveTeams={saveTeams} showToast={showToast} currentUser={currentUser} />}
+          {tab === 'groups'   && <GroupsTab teams={teams} groupResults={groupResults} setGroupResults={saveGroupResults} showToast={showToast} confirm={confirm} />}
+          {tab === 'teams'    && <TeamsTab teams={teams} saveTeams={saveTeams} showToast={showToast} currentUser={currentUser} confirm={confirm} />}
           {tab === 'stats'    && <StatsTab teams={teams} groupResults={groupResults} />}
-          {tab === 'admin' && isAdmin && <AdminTab users={users} saveUsers={saveUsers} teams={teams} groupResults={groupResults} showToast={showToast} currentUser={currentUser} exportAllData={exportAllData} importAllData={async (data)=>{ importAllData(data); const t=await loadData?.('sansan_teams',{})||{}; }} />}
+          {tab === 'profile'  && <ProfileTab currentUser={currentUser} users={users} saveUsers={saveUsers} showToast={showToast} updateCurrentUser={updateCurrentUser} />}
+          {tab === 'admin' && isAdmin && (
+            <AdminTab
+              users={users} saveUsers={saveUsers} teams={teams} saveTeams={saveTeams}
+              groupResults={groupResults} showToast={showToast} currentUser={currentUser} confirm={confirm}
+            />
+          )}
         </div>
       </main>
 
@@ -624,7 +814,7 @@ function OverviewTab({ teams, groupResults, currentUser }) {
 }
 
 // ══════════════════════ GROUPS TAB ══════════════════════
-function GroupsTab({ teams, groupResults, setGroupResults, showToast }) {
+function GroupsTab({ teams, groupResults, setGroupResults, showToast, confirm }) {
   const standings = useMemo(() => computeAllStandings(teams, groupResults), [teams, groupResults]);
   const groupIds = Object.keys(standings).sort();
   if (groupIds.length === 0) return <EmptyState text="Belum ada divisi. Tambahkan tim di tab 'Tim & Deck'!" />;
@@ -751,7 +941,7 @@ function GroupCard({ groupId, rows, groupResults, setGroupResults, showToast }) 
 }
 
 // ══════════════════════ TEAMS TAB ══════════════════════
-function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
+function TeamsTab({ teams, saveTeams, showToast, currentUser, confirm }) {
   const teamNames = Object.keys(teams);
   const [selected, setSelected] = useState(teamNames[0]||null);
   const [showNewForm, setShowNewForm] = useState(false);
@@ -763,13 +953,40 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
     if (selected && !teams[selected]) setSelected(teamNames[0]||null);
   },[teams]);
 
-  const addTeam = () => {
+  const addTeam = async () => {
     const name = newName.trim();
     if (!name) { showToast('Nama tim tidak boleh kosong','error'); return; }
     if (teams[name]) { showToast('Nama tim sudah ada','error'); return; }
-    saveTeams({...teams,[name]:{player:'',group:'A',deck:[],createdBy:currentUser.username}});
+    // Pakai mutateData (via saveTeams pola atomic) supaya kalau 2 orang
+    // membuat tim baru nyaris bersamaan, keduanya tetap tersimpan.
+    const result = await saveTeams(null, (current) => {
+      if (current[name]) throw new Error('TEAM_NAME_TAKEN');
+      return { ...current, [name]: { player:'', group:'A', deck:[], createdBy:currentUser.username } };
+    }).catch(e => e?.message === 'TEAM_NAME_TAKEN' ? 'TEAM_NAME_TAKEN' : Promise.reject(e));
+    if (result === 'TEAM_NAME_TAKEN') {
+      showToast('Nama tim baru saja dipakai, coba nama lain','error');
+      return;
+    }
+    await logActivity(currentUser.username, 'add_team', `Membuat tim "${name}"`);
     setSelected(name); setShowNewForm(false); setNewName('');
     showToast('✅ Tim ditambahkan!');
+  };
+
+  const deleteTeam = async (name) => {
+    const ok = await confirm({
+      title: 'Hapus Tim',
+      message: `Yakin ingin menghapus tim "${name}" beserta seluruh deck-nya? Tindakan ini tidak bisa dibatalkan.`,
+      confirmLabel: 'Ya, Hapus',
+      danger: true,
+    });
+    if (!ok) return;
+    await saveTeams(null, (current) => {
+      const updated = { ...current };
+      delete updated[name];
+      return updated;
+    });
+    await logActivity(currentUser.username, 'delete_team', `Menghapus tim "${name}"`);
+    showToast('Tim dihapus');
   };
 
   // Pemilik tim = yang membuatnya (createdBy). Tim lama tanpa createdBy
@@ -808,9 +1025,8 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
                   </div>
                 </div>
                 {mine && (
-                  <button onClick={e=>{e.stopPropagation(); if(confirm(`Hapus tim "${name}"?`)){
-                    const n={...teams}; delete n[name]; saveTeams(n); showToast('Tim dihapus');
-                  }}} style={{background:'none',border:'none',color:C.dim,cursor:'pointer',flexShrink:0}}>
+                  <button onClick={e=>{e.stopPropagation(); deleteTeam(name);}}
+                    style={{background:'none',border:'none',color:C.dim,cursor:'pointer',flexShrink:0}}>
                     <Trash2 size={13}/>
                   </button>
                 )}
@@ -849,7 +1065,7 @@ function TeamsTab({ teams, saveTeams, showToast, currentUser }) {
             ? <TeamDetail
                 name={selected}
                 info={teams[selected]}
-                onUpdate={info=>saveTeams({...teams,[selected]:info})}
+                onUpdate={info=>saveTeams(null, current=>({...current,[selected]:info}))}
                 showToast={showToast}
                 readOnly={!canManage(teams[selected])}
               />
@@ -1290,33 +1506,205 @@ function TeamStatsDetail({ summary }) {
 }
 
 // ══════════════════════ ADMIN TAB ══════════════════════
-function AdminTab({ users, saveUsers, teams, groupResults, showToast, currentUser }) {
+// ══════════════════════ PROFILE TAB (edit profil sendiri) ══════════════════════
+function ProfileTab({ currentUser, users, saveUsers, showToast, updateCurrentUser }) {
+  const [displayName, setDisplayName] = useState(currentUser.displayName || '');
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const saveDisplayName = async () => {
+    const trimmed = displayName.trim();
+    if (!trimmed) { showToast('Nama tampil tidak boleh kosong','error'); return; }
+    setSaving(true);
+    try {
+      const result = await saveUsers(null, (current) => {
+        if (!current[currentUser.username]) throw new Error('USER_NOT_FOUND');
+        return { ...current, [currentUser.username]: { ...current[currentUser.username], displayName: trimmed } };
+      });
+      if (result === 'USERNAME_TAKEN') return; // tidak relevan di sini tapi jaga-jaga
+      updateCurrentUser({ ...currentUser, displayName: trimmed });
+      await logActivity(currentUser.username, 'update_profile', 'Mengubah nama tampil');
+      showToast('✅ Nama tampil diperbarui!');
+    } catch (e) {
+      console.error(e);
+    } finally { setSaving(false); }
+  };
+
+  const changePassword = async () => {
+    if (!oldPassword || !newPassword || !confirmPassword) {
+      showToast('Semua kolom password wajib diisi','error'); return;
+    }
+    if (newPassword.length < 6) { showToast('Password baru minimal 6 karakter','error'); return; }
+    if (newPassword !== confirmPassword) { showToast('Konfirmasi password tidak cocok','error'); return; }
+
+    setSaving(true);
+    try {
+      const oldHash = await hashPassword(oldPassword);
+      if (oldHash !== currentUser.passwordHash) {
+        showToast('Password saat ini salah','error');
+        setSaving(false);
+        return;
+      }
+      const newHash = await hashPassword(newPassword);
+      const result = await saveUsers(null, (current) => {
+        if (!current[currentUser.username]) throw new Error('USER_NOT_FOUND');
+        return { ...current, [currentUser.username]: { ...current[currentUser.username], passwordHash: newHash } };
+      });
+      updateCurrentUser({ ...currentUser, passwordHash: newHash });
+      await logActivity(currentUser.username, 'change_password', 'Mengganti password');
+      showToast('✅ Password berhasil diganti!');
+      setOldPassword(''); setNewPassword(''); setConfirmPassword('');
+    } catch (e) {
+      console.error(e);
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div>
+      <SectionTitle emoji="👤">Profil Saya</SectionTitle>
+
+      <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))', gap:14}}>
+        {/* INFO AKUN */}
+        <div style={{...card(), padding:20}}>
+          <div style={{display:'flex', alignItems:'center', gap:12, marginBottom:16}}>
+            <div style={{
+              width:50, height:50, borderRadius:'50%', flexShrink:0,
+              background:`linear-gradient(135deg,${C.accent2},${C.purple})`,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:20, fontWeight:800, color:'#fff',
+            }}>
+              {currentUser.displayName?.[0]?.toUpperCase() || '?'}
+            </div>
+            <div>
+              <div style={{fontWeight:800, fontSize:15, display:'flex', alignItems:'center', gap:6}}>
+                {currentUser.displayName}
+                {currentUser.role==='admin' && <Crown size={14} style={{color:C.accent}}/>}
+              </div>
+              <div style={{fontSize:11, color:C.dim}}>@{currentUser.username}</div>
+            </div>
+          </div>
+
+          <div style={{...pill(currentUser.role==='admin'?C.accent:C.blue), fontSize:11, marginBottom:16}}>
+            {currentUser.role==='admin' ? '👑 Admin' : '👤 Member'}
+          </div>
+
+          <Field label="Nama Tampil">
+            <input value={displayName} onChange={e=>setDisplayName(e.target.value)} style={inputBase} />
+          </Field>
+          <button onClick={saveDisplayName} disabled={saving} style={{...btnPrimary, width:'100%', justifyContent:'center'}}>
+            {saving ? <Loader2 size={14} className="animate-spin"/> : <Save size={14}/>} Simpan Nama
+          </button>
+        </div>
+
+        {/* GANTI PASSWORD */}
+        <div style={{...card(), padding:20}}>
+          <div className="bebas" style={{fontSize:16, color:C.accent, marginBottom:14, display:'flex', alignItems:'center', gap:8}}>
+            <KeyRound size={16}/> Ganti Password
+          </div>
+          <Field label="Password Saat Ini">
+            <div style={{position:'relative'}}>
+              <input type={showPw?'text':'password'} value={oldPassword} onChange={e=>setOldPassword(e.target.value)}
+                placeholder="••••••••" style={{...inputBase, paddingRight:40}} />
+              <button type="button" onClick={()=>setShowPw(!showPw)} style={{
+                position:'absolute', right:10, top:'50%', transform:'translateY(-50%)',
+                background:'none', border:'none', color:C.dim, cursor:'pointer', padding:0,
+              }}>
+                {showPw ? <EyeOff size={16}/> : <Eye size={16}/>}
+              </button>
+            </div>
+          </Field>
+          <Field label="Password Baru (min 6 karakter)">
+            <input type={showPw?'text':'password'} value={newPassword} onChange={e=>setNewPassword(e.target.value)}
+              placeholder="••••••••" style={inputBase} />
+          </Field>
+          <Field label="Konfirmasi Password Baru">
+            <input type={showPw?'text':'password'} value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)}
+              placeholder="••••••••" style={inputBase} />
+          </Field>
+          <button onClick={changePassword} disabled={saving} style={{...btnSuccess, width:'100%', justifyContent:'center'}}>
+            {saving ? <Loader2 size={14} className="animate-spin"/> : <KeyRound size={14}/>} Ganti Password
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ══════════════════════ ADMIN TAB ══════════════════════
+function AdminTab({ users, saveUsers, teams, saveTeams, groupResults, showToast, currentUser, confirm }) {
   const pending  = Object.values(users).filter(u=>u.status==='pending');
   const approved = Object.values(users).filter(u=>u.status==='approved');
   const rejected = Object.values(users).filter(u=>u.status==='rejected');
   const fileRef = useRef(null);
+  const [view, setView] = useState('users'); // 'users' | 'log'
+  const [activityLog, setActivityLog] = useState([]);
+  const [logLoading, setLogLoading] = useState(false);
 
+  const loadLog = async () => {
+    setLogLoading(true);
+    try {
+      const log = await loadDataSafe('sansan_activity_log', []);
+      setActivityLog(Array.isArray(log) ? log : []);
+    } finally { setLogLoading(false); }
+  };
+
+  useEffect(() => { if (view === 'log') loadLog(); }, [view]);
+
+  // Semua aksi di bawah ini pakai mutateData (fetch-fresh + apply) supaya
+  // kalau 2 admin approve/reject/delete user yang berbeda nyaris bersamaan,
+  // keduanya tetap tersimpan — tidak saling menimpa seperti pola lama.
   const approve = async (username) => {
-    const updated = { ...users, [username]: { ...users[username], status:'approved' } };
-    await saveUsers(updated);
+    const result = await saveUsers(null, (current) => {
+      if (!current[username]) return current; // user sudah dihapus duluan, abaikan
+      return { ...current, [username]: { ...current[username], status:'approved' } };
+    });
+    await logActivity(currentUser.username, 'approve_user', `Menyetujui akun @${username}`);
     showToast(`✅ ${username} disetujui!`);
   };
+
   const reject = async (username) => {
-    const updated = { ...users, [username]: { ...users[username], status:'rejected' } };
-    await saveUsers(updated);
+    await saveUsers(null, (current) => {
+      if (!current[username]) return current;
+      return { ...current, [username]: { ...current[username], status:'rejected' } };
+    });
+    await logActivity(currentUser.username, 'reject_user', `Menolak akun @${username}`);
     showToast(`❌ ${username} ditolak`,'warn');
   };
+
   const deleteUser = async (username) => {
-    if (!confirm(`Hapus user "${username}" permanen?`)) return;
-    const updated = { ...users };
-    delete updated[username];
-    await saveUsers(updated);
+    const ok = await confirm({
+      title: 'Hapus User',
+      message: `Yakin ingin menghapus user "${username}" secara permanen? Tindakan ini tidak bisa dibatalkan.`,
+      confirmLabel: 'Ya, Hapus',
+      danger: true,
+    });
+    if (!ok) return;
+    await saveUsers(null, (current) => {
+      const updated = { ...current };
+      delete updated[username];
+      return updated;
+    });
+    await logActivity(currentUser.username, 'delete_user', `Menghapus akun @${username}`);
     showToast('User dihapus');
   };
+
   const promoteToAdmin = async (username) => {
-    if (!confirm(`Jadikan "${username}" admin?`)) return;
-    const updated = { ...users, [username]: { ...users[username], role:'admin' } };
-    await saveUsers(updated);
+    const ok = await confirm({
+      title: 'Jadikan Admin',
+      message: `Jadikan "${username}" sebagai admin? Admin punya akses penuh ke semua data dan user.`,
+      confirmLabel: 'Ya, Jadikan Admin',
+      danger: false,
+    });
+    if (!ok) return;
+    await saveUsers(null, (current) => {
+      if (!current[username]) return current;
+      return { ...current, [username]: { ...current[username], role:'admin' } };
+    });
+    await logActivity(currentUser.username, 'promote_admin', `Menjadikan @${username} sebagai admin`);
     showToast(`👑 ${username} jadi admin!`);
   };
 
@@ -1328,6 +1716,12 @@ function AdminTab({ users, saveUsers, teams, groupResults, showToast, currentUse
     a.download=`sansan-backup-${new Date().toISOString().slice(0,10)}.json`; a.click();
     URL.revokeObjectURL(url);
     showToast('✅ Backup diunduh!');
+  };
+
+  const ACTION_ICONS = {
+    signup: '🆕', admin_signup: '👑', approve_user: '✅', reject_user: '❌',
+    delete_user: '🗑️', promote_admin: '👑', update_profile: '✏️',
+    change_password: '🔑', add_team: '🛡️', delete_team: '🗑️',
   };
 
   return (
@@ -1343,97 +1737,150 @@ function AdminTab({ users, saveUsers, teams, groupResults, showToast, currentUse
         <StatBox num={Object.keys(groupResults).length} label="Match"  emoji="⚔️" />
       </div>
 
-      {/* PENDING APPROVAL */}
-      {pending.length > 0 && (
-        <div style={{...card(), padding:16, marginBottom:14, border:`1px solid ${C.orange}44`}}>
-          <div className="bebas" style={{fontSize:16, color:C.orange, marginBottom:10}}>
-            ⏳ Menunggu Approval ({pending.length})
-          </div>
-          {pending.map(u=>(
-            <div key={u.username} style={{
-              display:'flex', alignItems:'center', gap:10,
-              padding:'8px 12px', background:C.surface, border:`1px solid ${C.border}`,
-              borderRadius:8, marginBottom:6,
-            }}>
-              <div style={{flex:1}}>
-                <div style={{fontWeight:700, fontSize:13}}>{u.displayName}</div>
-                <div style={{fontSize:11, color:C.dim}}>@{u.username} · {new Date(u.createdAt).toLocaleDateString('id-ID')}</div>
+      {/* TAB SWITCH: Users vs Activity Log */}
+      <div style={{display:'flex', gap:6, marginBottom:14}}>
+        <button onClick={()=>setView('users')} style={{
+          ...btnGhost, border:`1px solid ${view==='users'?C.accent2:C.border}`,
+          color: view==='users'?C.accent2:C.dim,
+        }}>
+          <Users size={13}/> Kelola User
+        </button>
+        <button onClick={()=>setView('log')} style={{
+          ...btnGhost, border:`1px solid ${view==='log'?C.accent2:C.border}`,
+          color: view==='log'?C.accent2:C.dim,
+        }}>
+          <History size={13}/> Activity Log
+        </button>
+      </div>
+
+      {view === 'users' ? (
+        <>
+          {/* PENDING APPROVAL */}
+          {pending.length > 0 && (
+            <div style={{...card(), padding:16, marginBottom:14, border:`1px solid ${C.orange}44`}}>
+              <div className="bebas" style={{fontSize:16, color:C.orange, marginBottom:10}}>
+                ⏳ Menunggu Approval ({pending.length})
               </div>
-              <button onClick={()=>approve(u.username)} style={{...btnSuccess, padding:'6px 12px', fontSize:12}}>
-                <CheckCircle size={13}/> Approve
-              </button>
-              <button onClick={()=>reject(u.username)} style={{...btnDanger, padding:'6px 12px', fontSize:12}}>
-                <XCircle size={13}/> Tolak
-              </button>
+              {pending.map(u=>(
+                <div key={u.username} style={{
+                  display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
+                  padding:'8px 12px', background:C.surface, border:`1px solid ${C.border}`,
+                  borderRadius:8, marginBottom:6,
+                }}>
+                  <div style={{flex:1, minWidth:120}}>
+                    <div style={{fontWeight:700, fontSize:13}}>{u.displayName}</div>
+                    <div style={{fontSize:11, color:C.dim}}>@{u.username} · {new Date(u.createdAt).toLocaleDateString('id-ID')}</div>
+                  </div>
+                  <button onClick={()=>approve(u.username)} style={{...btnSuccess, padding:'6px 12px', fontSize:12}}>
+                    <CheckCircle size={13}/> Approve
+                  </button>
+                  <button onClick={()=>reject(u.username)} style={{...btnDanger, padding:'6px 12px', fontSize:12}}>
+                    <XCircle size={13}/> Tolak
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
+
+          {/* ALL USERS */}
+          <div style={{...card(), padding:16, marginBottom:14}}>
+            <div className="bebas" style={{fontSize:16, color:C.accent, marginBottom:10}}>👥 Semua User</div>
+            {[...approved, ...rejected].map(u=>(
+              <div key={u.username} style={{
+                display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
+                padding:'8px 12px', background:C.surface, border:`1px solid ${C.border}`,
+                borderRadius:8, marginBottom:6,
+              }}>
+                <div style={{flex:1, minWidth:120}}>
+                  <div style={{fontWeight:700, fontSize:13, display:'flex', alignItems:'center', gap:6}}>
+                    {u.role==='admin'&&<Crown size={13} style={{color:C.accent,flexShrink:0}}/>}
+                    {u.displayName}
+                  </div>
+                  <div style={{fontSize:11, color:C.dim}}>@{u.username}</div>
+                </div>
+                <span style={{
+                  ...pill(u.status==='approved'?C.green:u.status==='rejected'?C.red:C.orange),
+                  fontSize:10,
+                }}>
+                  {u.status==='approved'?'✅ Approved':u.status==='rejected'?'❌ Ditolak':'⏳ Pending'}
+                </span>
+                {u.username !== currentUser.username && (
+                  <>
+                    {u.status==='rejected' && (
+                      <button onClick={()=>approve(u.username)} style={{...btnSuccess,padding:'4px 8px',fontSize:11}}>
+                        <CheckCircle size={11}/> Re-approve
+                      </button>
+                    )}
+                    {u.role!=='admin' && (
+                      <button onClick={()=>promoteToAdmin(u.username)} style={{...btnGhost,padding:'4px 8px',fontSize:11}}>
+                        <Crown size={11}/> Jadikan Admin
+                      </button>
+                    )}
+                    <button onClick={()=>deleteUser(u.username)} style={{...btnDanger,padding:'4px 8px',fontSize:11}}>
+                      <Trash2 size={11}/>
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* BACKUP */}
+          <div style={{...card(), padding:16}}>
+            <div className="bebas" style={{fontSize:16, color:C.accent, marginBottom:10}}>💾 Backup Data</div>
+            <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+              <button onClick={handleExport} style={btnSuccess}>
+                <Download size={14}/> Export Backup JSON
+              </button>
+              <button onClick={()=>fileRef.current?.click()} style={btnGhost}>
+                <Upload size={14}/> Import Backup JSON
+              </button>
+              <input ref={fileRef} type="file" accept="application/json" style={{display:'none'}} onChange={e=>{
+                const file=e.target.files[0]; if (!file) return;
+                const r=new FileReader();
+                r.onload=ev=>{ try{ importAllData(JSON.parse(ev.target.result)); showToast('✅ Data diimpor! Refresh halaman.'); } catch{ showToast('File tidak valid','error'); }};
+                r.readAsText(file); e.target.value='';
+              }} />
+            </div>
+            <div style={{fontSize:11, color:C.dim, marginTop:8}}>
+              💡 Export secara rutin untuk backup. Import akan mengganti data lokal (perlu refresh setelah import).
+            </div>
+          </div>
+        </>
+      ) : (
+        // ACTIVITY LOG VIEW
+        <div style={{...card(), padding:16}}>
+          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12}}>
+            <div className="bebas" style={{fontSize:16, color:C.accent}}>📜 Riwayat Aktivitas</div>
+            <button onClick={loadLog} style={{...btnGhost, padding:'5px 10px', fontSize:11}}>
+              {logLoading ? <Loader2 size={12} className="animate-spin"/> : '🔄'} Refresh
+            </button>
+          </div>
+          {logLoading ? (
+            <div style={{color:C.dim, fontSize:12, padding:'16px 0', textAlign:'center'}}>Memuat...</div>
+          ) : activityLog.length === 0 ? (
+            <div style={{color:C.dim, fontSize:12, padding:'16px 0', textAlign:'center'}}>Belum ada aktivitas tercatat.</div>
+          ) : (
+            <div style={{display:'flex', flexDirection:'column', gap:4, maxHeight:500, overflowY:'auto'}}>
+              {activityLog.map((entry, i) => (
+                <div key={i} style={{
+                  display:'flex', alignItems:'flex-start', gap:8,
+                  padding:'8px 10px', background:C.surface, border:`1px solid ${C.border}`,
+                  borderRadius:6, fontSize:12,
+                }}>
+                  <span style={{fontSize:16, flexShrink:0}}>{ACTION_ICONS[entry.action] || '📌'}</span>
+                  <div style={{flex:1, minWidth:0}}>
+                    <div><strong>@{entry.actor}</strong> — {entry.detail || entry.action}</div>
+                    <div style={{fontSize:10, color:C.dim, marginTop:2}}>
+                      {new Date(entry.ts).toLocaleString('id-ID')}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
-
-      {/* ALL USERS */}
-      <div style={{...card(), padding:16, marginBottom:14}}>
-        <div className="bebas" style={{fontSize:16, color:C.accent, marginBottom:10}}>👥 Semua User</div>
-        {[...approved, ...rejected].map(u=>(
-          <div key={u.username} style={{
-            display:'flex', alignItems:'center', gap:10, flexWrap:'wrap',
-            padding:'8px 12px', background:C.surface, border:`1px solid ${C.border}`,
-            borderRadius:8, marginBottom:6,
-          }}>
-            <div style={{flex:1, minWidth:0}}>
-              <div style={{fontWeight:700, fontSize:13, display:'flex', alignItems:'center', gap:6}}>
-                {u.role==='admin'&&<Crown size={13} style={{color:C.accent,flexShrink:0}}/>}
-                {u.displayName}
-              </div>
-              <div style={{fontSize:11, color:C.dim}}>@{u.username}</div>
-            </div>
-            <span style={{
-              ...pill(u.status==='approved'?C.green:u.status==='rejected'?C.red:C.orange),
-              fontSize:10,
-            }}>
-              {u.status==='approved'?'✅ Approved':u.status==='rejected'?'❌ Ditolak':'⏳ Pending'}
-            </span>
-            {u.username !== currentUser.username && (
-              <>
-                {u.status==='rejected' && (
-                  <button onClick={()=>approve(u.username)} style={{...btnSuccess,padding:'4px 8px',fontSize:11}}>
-                    <CheckCircle size={11}/> Re-approve
-                  </button>
-                )}
-                {u.role!=='admin' && (
-                  <button onClick={()=>promoteToAdmin(u.username)} style={{...btnGhost,padding:'4px 8px',fontSize:11}}>
-                    <Crown size={11}/> Jadikan Admin
-                  </button>
-                )}
-                <button onClick={()=>deleteUser(u.username)} style={{...btnDanger,padding:'4px 8px',fontSize:11}}>
-                  <Trash2 size={11}/>
-                </button>
-              </>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* BACKUP */}
-      <div style={{...card(), padding:16}}>
-        <div className="bebas" style={{fontSize:16, color:C.accent, marginBottom:10}}>💾 Backup Data</div>
-        <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
-          <button onClick={handleExport} style={btnSuccess}>
-            <Download size={14}/> Export Backup JSON
-          </button>
-          <button onClick={()=>fileRef.current?.click()} style={btnGhost}>
-            <Upload size={14}/> Import Backup JSON
-          </button>
-          <input ref={fileRef} type="file" accept="application/json" style={{display:'none'}} onChange={e=>{
-            const file=e.target.files[0]; if (!file) return;
-            const r=new FileReader();
-            r.onload=ev=>{ try{ importAllData(JSON.parse(ev.target.result)); showToast('✅ Data diimpor! Refresh halaman.'); } catch{ showToast('File tidak valid','error'); }};
-            r.readAsText(file); e.target.value='';
-          }} />
-        </div>
-        <div style={{fontSize:11, color:C.dim, marginTop:8}}>
-          💡 Export secara rutin untuk backup. Import akan mengganti data lokal (perlu refresh setelah import).
-        </div>
-      </div>
     </div>
   );
 }
